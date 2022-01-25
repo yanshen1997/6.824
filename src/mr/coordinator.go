@@ -1,15 +1,18 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
-
+import (
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync"
+)
 
 type Coordinator struct {
 	// Your definitions here.
-
+	count int
+	lock  sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -21,9 +24,11 @@ type Coordinator struct {
 //
 func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
+	defer c.lock.Unlock()
+	c.lock.Lock()
+	c.count++
 	return nil
 }
-
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -49,8 +54,11 @@ func (c *Coordinator) Done() bool {
 	ret := false
 
 	// Your code here.
-
-
+	defer c.lock.Unlock()
+	c.lock.Lock()
+	if c.count == 10 {
+		ret = true
+	}
 	return ret
 }
 
@@ -63,8 +71,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
 	// Your code here.
-
-
+	c.lock = sync.Mutex{}
 	c.server()
 	return &c
 }
