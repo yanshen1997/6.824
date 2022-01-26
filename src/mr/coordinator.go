@@ -1,16 +1,48 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
-
+import (
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync"
+	"time"
+)
 
 type Coordinator struct {
 	// Your definitions here.
-
+	lock         sync.Mutex
+	workerId     int //一个新worker注册的时候给它分配一个id，该id自增
+	tempFilePath []string
+	workers      map[int]worker
+	task         map[string]task //通过文件路径名找到task
 }
+
+type worker struct {
+	id       int
+	state    workerState
+	currTask *task
+	ticker   time.Ticker // 超时通知
+}
+
+// worker的状态应当有空闲、运转和失败
+type workerState int
+
+type task struct {
+	state      taskState
+	tType      bool   //map=true reduce=false
+	filePath   string // 一个任务处理一个文件
+	currWorker *worker
+}
+type taskState int
+
+const (
+	idle int = iota
+	inProgress
+	completed
+	failed
+)
 
 // Your code here -- RPC handlers for the worker to call.
 
@@ -23,7 +55,6 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
 }
-
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -50,7 +81,6 @@ func (c *Coordinator) Done() bool {
 
 	// Your code here.
 
-
 	return ret
 }
 
@@ -63,7 +93,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
 	// Your code here.
-
 
 	c.server()
 	return &c
