@@ -1,10 +1,14 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-
+import (
+	"fmt"
+	"hash/fnv"
+	"log"
+	"math/rand"
+	"net/rpc"
+	"os"
+	"time"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,6 +28,11 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+var (
+	thisWorker  *worker
+	thisMapf    *func(string, string) []KeyValue
+	thisReducef *func(string, []string) string
+)
 
 //
 // main/mrworker.go calls this function.
@@ -32,7 +41,9 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-
+	CallRegister(&mapf, &reducef)
+	// runTask(mapf, reducef, thisWorker.currTask)
+	// CallFinish()
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
 
@@ -67,6 +78,39 @@ func CallExample() {
 	}
 }
 
+func CallRegister(mapf *func(string, string) []KeyValue,
+	reducef *func(string, []string) string) {
+	args := RegArgs{}
+	reply := RegReply{}
+
+	ok := call("Coordinator.RegisterWorker", &args, &reply)
+	if !ok {
+		os.Exit(1)
+	}
+	thisWorker = &worker{
+		id: reply.Id,
+		currTask: &task{
+			tType:    reply.TaskType,
+			filePath: reply.FilePath,
+		},
+		state: workerState(inProgress),
+	}
+	thisMapf, thisReducef = mapf, reducef
+	runTask(*thisMapf, *thisReducef, thisWorker.currTask)
+}
+
+func CallFinish() {
+	args := FinishArgs{
+		WorkerId: thisWorker.id,
+	}
+	reply := FinishReply{}
+	ok := call("Coordinator.Finish", &args, &reply)
+	if !ok {
+		fmt.Printf("call Finish failed!\n")
+	}
+	fmt.Println(reply.Msg)
+}
+
 //
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
@@ -88,4 +132,13 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 
 	fmt.Println(err)
 	return false
+}
+
+func runTask(mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string, t *task) {
+	rand.Seed(time.Now().UnixNano())
+	timeSecond := rand.Intn(10)
+	fmt.Printf("task running...\ncurrTask:%+v\nwill exec %d s\n", *t, timeSecond)
+	time.Sleep(time.Duration(timeSecond) * time.Second)
+	CallFinish()
 }
