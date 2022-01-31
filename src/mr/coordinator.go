@@ -21,6 +21,8 @@ type Coordinator struct {
 	idleWorkers  *[]*worker
 	fileMapTasks map[string]*task //通过文件路径名找到task
 	idleTasks    *[]*task
+	finishWg     sync.WaitGroup
+	finishChan   chan struct{}
 }
 
 type worker struct {
@@ -58,7 +60,7 @@ const (
 )
 
 // Your code here -- RPC handlers for the worker to call.
-
+// RegisterWorker 注册worker
 func (c *Coordinator) RegisterWorker(args *RegArgs, reply *RegReply) error {
 	defer func() {
 		c.workers[c.workerId].ticker = *time.NewTicker(time.Second * 10)
@@ -66,14 +68,14 @@ func (c *Coordinator) RegisterWorker(args *RegArgs, reply *RegReply) error {
 		c.workerId++
 		c.lock.Unlock()
 	}()
+	reply.Id = c.workerId
+	//加锁避免同时多个worker注册引发竞争
 	c.lock.Lock()
 	c.workers[c.workerId] = &worker{
 		id:         c.workerId,
 		state:      workerState(idle),
 		finishChan: make(chan struct{}),
-		// ticker:     *time.NewTicker(time.Second * 10),
 	}
-	reply.Id = c.workerId
 	idleTaskList := *c.idleTasks
 	if len(idleTaskList) != 0 {
 		task := idleTaskList[0]
@@ -96,36 +98,50 @@ func (c *Coordinator) monitorWorker(id int) {
 	}
 	select { // 这里后续仔细考察一下时序。20220126
 	case <-worker.ticker.C:
-		worker.lock.Lock()
-		curTask := worker.currTask
-		if curTask == nil {
-			worker.lock.Unlock()
-			return
-		}
-		// 超时未完成则委派给其他worker
-		// if curTask.state != taskState(completed) {
-		curTask.state = taskState(idle)
-		c.appandIdleTask(curTask)
-		curTask.currWorker = nil
-		worker.currTask = nil
-		worker.state = workerState(idle)
+		c.appandIdleTask(worker.currTask)
 		c.appandIdleWorker(worker)
-		worker.lock.Unlock()
+		worker.changeField(taskTimeout)
 	case <-worker.finishChan:
-		worker.lock.Lock()
-		worker.currTask.state = taskState(completed)
-		worker.currTask.currWorker = nil
-		worker.currTask = nil
-		worker.state = workerState(idle)
-		c.appandIdleWorker(worker)
-		worker.lock.Unlock()
+		worker.changeField(finishTask)
+		c.finishWg.Done()
 	}
 }
 
-func (c *Coordinator) appandIdleWorker(w *worker) {
+// 修改worker字段
+func (w *worker) changeField(f func(*worker)) {
+	w.lock.Lock()
+	defer w.lock.Unlock()
+	f(w)
+}
+
+// worker完成任务后处理
+func finishTask(w *worker) {
+	w.currTask.state = taskState(completed)
+	w.currTask.currWorker = nil
+	w.currTask = nil
+	w.state = workerState(idle)
+}
+
+func taskTimeout(w *worker) {
+	curTask := w.currTask
+	if curTask == nil {
+		return
+	}
+	// 超时未完成则委派给其他worker
+	curTask.state = taskState(idle)
+	curTask.currWorker = nil
+	w.currTask = nil
+	w.state = workerState(idle)
+}
+
+func (c *Coordinator) changeField(f func(*Coordinator)) {
 	c.lock.Lock()
+	defer c.lock.Unlock()
+	f(c)
+}
+
+func (c *Coordinator) appandIdleWorker(w *worker) {
 	(*c.idleWorkers) = append((*c.idleWorkers), w)
-	c.lock.Unlock()
 }
 func (c *Coordinator) appandIdleTask(t *task) {
 	c.lock.Lock()
@@ -135,8 +151,10 @@ func (c *Coordinator) appandIdleTask(t *task) {
 
 func (c *Coordinator) Finish(args *FinishArgs, reply *FinishReply) error {
 	id := args.WorkerId
+	c.lock.RLock()
 	worker := c.workers[id]
-	worker.lock.Lock()
+	c.lock.RUnlock()
+	// 下面对worker的读写不加锁是默认只会有一个worker在调用master中对应的元数据
 	if worker.state == workerState(idle) {
 		reply.Msg = "failed. timeout.."
 		return nil
@@ -181,11 +199,11 @@ func (c *Coordinator) Done() bool {
 	ret := false
 
 	// Your code here.
-	c.lock.Lock()
-	if len(*c.idleTasks) == 0 {
+	select {
+	case <-c.finishChan:
 		ret = true
+	default:
 	}
-	c.lock.Unlock()
 	return ret
 }
 
@@ -203,6 +221,8 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		idleWorkers:  &([]*worker{}),
 		fileMapTasks: map[string]*task{},
 		idleTasks:    &([]*task{}),
+		finishWg:     sync.WaitGroup{},
+		finishChan:   make(chan struct{}),
 	}
 
 	// Your code here.
@@ -215,8 +235,13 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		}
 		(*c.idleTasks) = append((*c.idleTasks), task)
 		c.fileMapTasks[fmt.Sprintf("test%d", i)] = task
+		c.finishWg.Add(1)
 	}
-
+	fmt.Printf(" %d tasks...\n", len((*c.idleTasks)))
+	go func() {
+		c.finishWg.Wait()
+		c.finishChan <- struct{}{}
+	}()
 	c.server()
 	return &c
 }
